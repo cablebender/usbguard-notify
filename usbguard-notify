@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+
+#
+# usbguard-notify
+#
+# Kleiner Desktop-Agent für USBGuard unter Linux Mint / Cinnamon.
+#
+# Unbekannte USB-Geräte werden zunächst durch USBGuard blockiert.
+# Anschließend erscheint ein Zenity-Dialog mit folgenden Optionen:
+#
+#   - Blockieren
+#   - Einmal erlauben
+#   - Dauerhaft erlauben
+#
+# Enter / ESC / Schließen des Fensters:
+#   -> Gerät bleibt blockiert
+#
+# Benötigt:
+#   usbguard
+#   zenity
+#   flock (util-linux)
+#
+# Der angemeldete Benutzer benötigt IPC-Zugriff auf USBGuard.
+#
+
+set -u
+
+
+# ----------------------------------------------------------------------
+# Programme suchen
+# ----------------------------------------------------------------------
+
+USBGUARD="$(command -v usbguard || true)"
+ZENITY="$(command -v zenity || true)"
+FLOCK="$(command -v flock || true)"
+
+if [[ -z "$USBGUARD" ]]; then
+    echo "Fehler: usbguard wurde nicht gefunden." >&2
+    exit 1
+fi
+
+if [[ -z "$ZENITY" ]]; then
+    echo "Fehler: zenity wurde nicht gefunden." >&2
+    exit 1
+fi
+
+if [[ -z "$FLOCK" ]]; then
+    echo "Fehler: flock wurde nicht gefunden." >&2
+    exit 1
+fi
+
+
+# ----------------------------------------------------------------------
+# Nur eine Instanz zulassen
+# ----------------------------------------------------------------------
+
+LOCKDIR="${XDG_RUNTIME_DIR:-/tmp}"
+LOCKFILE="${LOCKDIR}/usbguard-notify-${UID}.lock"
+
+exec 9>"$LOCKFILE"
+
+if ! "$FLOCK" -n 9; then
+    # Bereits laufende Instanz ist kein Fehler.
+    exit 0
+fi
+
+
+# ----------------------------------------------------------------------
+# USB-Interface-Klassen übersetzen
+# ----------------------------------------------------------------------
+
+interface_name()
+{
+    case "$1" in
+
+        03:01:01)
+            echo "HID-Tastatur"
+            ;;
+
+        03:01:02)
+            echo "HID-Maus"
+            ;;
+
+        03:00:00)
+            echo "HID-Gerät"
+            ;;
+
+        08:06:50)
+            echo "Massenspeicher"
+            ;;
+
+        09:*)
+            echo "USB-Hub"
+            ;;
+
+        01:*)
+            echo "Audio"
+            ;;
+
+        02:*|0a:*)
+            echo "Netzwerk / Kommunikation"
+            ;;
+
+        0e:*)
+            echo "Video / Kamera"
+            ;;
+
+        e0:*)
+            echo "Drahtlose Kommunikation"
+            ;;
+
+        ff:*)
+            echo "Herstellerspezifisch"
+            ;;
+
+        *)
+            echo "Unbekannte Schnittstelle"
+            ;;
+
+    esac
+}
+
+
+# ----------------------------------------------------------------------
+# Dialog für ein blockiertes Gerät
+# ----------------------------------------------------------------------
+
+show_device()
+{
+    local device_id="$1"
+    local rule="$2"
+
+    local name=""
+    local vidpid=""
+    local serial=""
+    local port=""
+    local interfaces=""
+
+    local iface=""
+    local iface_name=""
+    local interface_text=""
+    local warning=""
+    local response=""
+
+
+    # ------------------------------------------------------------------
+    # Informationen aus der USBGuard-Regel extrahieren
+    # ------------------------------------------------------------------
+
+    name="$(
+        sed -n 's/.* name "\([^"]*\)".*/\1/p' <<< "$rule"
+    )"
+
+    vidpid="$(
+        sed -n 's/.* id \([^ ]*\).*/\1/p' <<< "$rule"
+    )"
+
+    serial="$(
+        sed -n 's/.* serial "\([^"]*\)".*/\1/p' <<< "$rule"
+    )"
+
+    port="$(
+        sed -n 's/.* via-port "\([^"]*\)".*/\1/p' <<< "$rule"
+    )"
+
+    interfaces="$(
+        sed -n \
+            's/.* with-interface \(.*\) with-connect-type.*/\1/p' \
+            <<< "$rule" |
+        tr -d '{}'
+    )"
+
+
+    # ------------------------------------------------------------------
+    # Fehlende Angaben ersetzen
+    # ------------------------------------------------------------------
+
+    [[ -z "$name" ]] && name="Unbekannt"
+    [[ -z "$vidpid" ]] && vidpid="Unbekannt"
+    [[ -z "$serial" ]] && serial="Keine"
+    [[ -z "$port" ]] && port="Unbekannt"
+
+
+    # ------------------------------------------------------------------
+    # Interfaces auswerten
+    # ------------------------------------------------------------------
+
+    for iface in $interfaces; do
+
+        iface_name="$(interface_name "$iface")"
+
+        interface_text+="${iface_name} (${iface})"$'\n'
+
+        #
+        # USB-Klasse 03 = HID
+        #
+        # Besonders relevant bei BadUSB / Rubber Ducky / O.MG Cable.
+        #
+
+        if [[ "$iface" == 03:* ]]; then
+
+            warning=$'\n⚠ WARNUNG: HID-Schnittstelle erkannt!\n'
+            warning+=$'Dieses Gerät kann Tastatur- oder Mauseingaben erzeugen.\n'
+
+        fi
+
+    done
+
+
+    if [[ -z "$interface_text" ]]; then
+
+        interface_text="Unbekannt"
+
+    else
+
+        # Letzten Zeilenumbruch entfernen
+        interface_text="${interface_text%$'\n'}"
+
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Zenity-Dialog
+    #
+    # Normaler OK-Button:
+    #     Blockieren
+    #
+    # Extra-Buttons:
+    #     Einmal erlauben
+    #     Dauerhaft erlauben
+    #
+    # Enter:
+    #     Blockieren
+    #
+    # ESC / Fenster schließen:
+    #     ebenfalls blockiert lassen
+    # ------------------------------------------------------------------
+
+    response="$(
+        "$ZENITY" \
+            --info \
+            --title="USBGuard – neues USB-Gerät" \
+            --width=520 \
+            --text="Ein neues USB-Gerät wurde BLOCKIERT.
+
+Name: $name
+USB-ID: $vidpid
+Seriennummer: $serial
+Port: $port
+
+Schnittstellen:
+$interface_text
+$warning
+Wie soll mit diesem Gerät verfahren werden?" \
+            --ok-label="Blockieren" \
+            --extra-button="Einmal erlauben" \
+            --extra-button="Dauerhaft erlauben" \
+            2>/dev/null
+    )" || true
+
+
+    # ------------------------------------------------------------------
+    # Benutzerentscheidung
+    # ------------------------------------------------------------------
+
+    case "$response" in
+
+        "Einmal erlauben")
+
+            "$USBGUARD" allow-device "$device_id"
+            ;;
+
+
+        "Dauerhaft erlauben")
+
+            "$USBGUARD" allow-device -p "$device_id"
+            ;;
+
+
+        *)
+
+            #
+            # Keine Aktion erforderlich.
+            #
+            # Das Gerät wurde von USBGuard bereits blockiert.
+            #
+            # Dazu gehören:
+            #
+            #   - Blockieren
+            #   - Enter
+            #   - ESC
+            #   - Fenster schließen
+            #
+
+            :
+            ;;
+
+    esac
+}
+
+
+# ----------------------------------------------------------------------
+# USBGuard überwachen
+# ----------------------------------------------------------------------
+
+while IFS= read -r line; do
+
+    #
+    # Ein PresenceChanged-Event beginnt beispielsweise mit:
+    #
+    # [device] PresenceChanged: id=50
+    #
+
+    if [[ "$line" =~ ^\[device\]\ PresenceChanged:\ id=([0-9]+) ]]; then
+
+        device_id="${BASH_REMATCH[1]}"
+
+
+        # --------------------------------------------------------------
+        # Zum PresenceChanged-Event gehören anschließend:
+        #
+        # event=Insert
+        # target=block
+        # device_rule=...
+        # --------------------------------------------------------------
+
+        IFS= read -r event_line  || continue
+        IFS= read -r target_line || continue
+        IFS= read -r rule_line   || continue
+
+
+        # --------------------------------------------------------------
+        # Nur neu angeschlossene Geräte
+        # --------------------------------------------------------------
+
+        if [[ "$event_line" != *"event=Insert"* ]]; then
+            continue
+        fi
+
+
+        # --------------------------------------------------------------
+        # Nur Geräte anzeigen, die USBGuard blockiert hat
+        #
+        # Bereits bekannte / erlaubte Geräte erzeugen keinen Dialog.
+        # --------------------------------------------------------------
+
+        if [[ "$target_line" != *"target=block"* ]]; then
+            continue
+        fi
+
+
+        # --------------------------------------------------------------
+        # "device_rule=" vom Anfang entfernen
+        # --------------------------------------------------------------
+
+        rule="${rule_line#*device_rule=}"
+
+
+        # --------------------------------------------------------------
+        # Dialog im Hintergrund öffnen.
+        #
+        # Dadurch bleibt usbguard watch weiterhin aktiv.
+        # --------------------------------------------------------------
+
+        show_device "$device_id" "$rule" &
+
+    fi
+
+done < <("$USBGUARD" watch)
