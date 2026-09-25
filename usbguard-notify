@@ -240,7 +240,7 @@ show_device()
         "$ZENITY" \
             --info \
             --title="USBGuard – neues USB-Gerät" \
-            --width=520 \
+            --width=400 \
             --text="Ein neues USB-Gerät wurde BLOCKIERT.
 
 Name: $name
