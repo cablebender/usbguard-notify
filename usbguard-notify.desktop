@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=USBGuard Notify
+Comment=USBGuard Desktop-Abfrage für neue USB-Geräte
+Exec=~/.local/bin/usbguard-notify
+Terminal=false
+X-GNOME-Autostart-enabled=true
