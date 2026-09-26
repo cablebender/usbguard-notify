@@ -9,8 +9,8 @@ blockiert, einmalig freigegeben oder dauerhaft angelernt werden kann.
 Gedacht ist das insbesondere als zusätzliche Schutzmaßnahme gegen
 **BadUSB-, HID-Injection- und O.MG-Cable-Angriffe**.
 
-![USBGuard Notify](<img width="490" height="524" alt="image" src="https://github.com/user-attachments/assets/ca4575b1-0995-4717-ab7c-ef5fae8c8f11" />
-)
+<img width="490" height="524" alt="image" src="https://github.com/user-attachments/assets/fcd2984e-e3ba-48aa-8ed9-63abc387be6b" />
+
 
 ## Funktionsweise
 
